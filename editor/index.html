@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIDI Cleaner Review</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="group">
+    <strong class="brand">MIDI Cleaner</strong>
+    <select id="project" title="Project (work/&lt;name&gt;)"></select>
+  </div>
+  <div class="group transport">
+    <button id="play" class="primary" title="Play / pause (Space)">▶ Play</button>
+    <button id="stop" title="Stop">■</button>
+    <span id="clock" class="mono">0:00.000</span>
+  </div>
+  <div class="group nav">
+    <button id="navStart" title="Go to start (Home)">⏮</button>
+    <button id="navPrev" title="Previous section ([ or Page Up)">◀ Section</button>
+    <span id="secName" class="secname"></span>
+    <button id="navNext" title="Next section (] or Page Down)">Section ▶</button>
+    <button id="navEnd" title="Go to end (End)">⏭</button>
+    <span class="sep"></span>
+    <button id="zoomOut" title="Zoom out (−)">−</button>
+    <button id="zoomFit" title="Fit whole piece (0)">Fit</button>
+    <button id="zoomIn" title="Zoom in (+)">+</button>
+  </div>
+  <div class="group">
+    <div class="seg" title="What playback uses (A/B). Press B to toggle.">
+      <button id="srcClean" class="on">Cleaned</button><button id="srcOrig">Original</button>
+    </div>
+    <label class="chk" title="Click on each beat of the tempo map (M)"><input type="checkbox" id="metro"> Click</label>
+    <label class="chk" title="Keep the playhead in view"><input type="checkbox" id="follow" checked> Follow</label>
+  </div>
+  <div class="group">
+    <select id="instrument" title="Playback instrument"></select>
+    <button id="fxToggle" title="Effects">FX ▾</button>
+  </div>
+  <div class="group">
+    <button id="askAI" disabled>Ask Claude</button>
+    <span id="aiLog" class="muted small ailog"></span>
+  </div>
+  <div class="group right">
+    <span id="saveState" class="muted"></span>
+    <button id="undo" title="Undo (Ctrl+Z)">↶</button>
+    <button id="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+    <button id="save" title="Save review state to work/&lt;name&gt;/review.json (Ctrl+S)">Save</button>
+    <button id="exportMid" class="primary" title="Render cleaned MIDI via the pipeline (also saves)">Export MIDI</button>
+    <button id="exportWav" title="Render cleaned performance with instrument + effects to WAV">Export WAV</button>
+    <button id="help" title="Keyboard shortcuts">?</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden">Claude updated the proposals. <button id="reloadBtn" class="primary">Reload</button> <span class="muted">Your decisions and edits are kept.</span></div>
+<section id="fxPanel" class="fx hidden" aria-label="Effects"></section>
+
+<main>
+  <div id="rollWrap">
+    <canvas id="roll"></canvas>
+    <div id="hoverTip" class="tip hidden"></div>
+  </div>
+  <aside id="side">
+    <div id="sync" class="sync"></div>
+    <div class="tabs">
+      <button data-tab="edits" class="on">Edits</button>
+      <button data-tab="sections">Sections</button>
+      <button data-tab="note">Selection</button>
+    </div>
+    <div id="tab-edits" class="tab">
+      <div class="filters" id="filters"></div>
+      <div id="edits"></div>
+    </div>
+    <div id="tab-sections" class="tab hidden"><div id="sections"></div></div>
+    <div id="tab-note" class="tab hidden"><div id="noteInfo" class="muted">Click a note to inspect it.</div></div>
+  </aside>
+</main>
+
+<footer class="bar small">
+  <span class="legend"><i class="sw moved"></i>moved <i class="sw del"></i>removed <i class="sw ghost"></i>original position <i class="sw prot"></i>protected (trill/tremolo) <i class="sw manual"></i>your edit <i class="sw ask"></i>note to Claude</span>
+  <span class="legend sec"><i class="sw steady"></i>steady <i class="sw ramp"></i>ramp <i class="sw rubato"></i>rubato</span>
+  <label class="chk"><input type="checkbox" id="ghosts" checked> Ghosts</label>
+  <label class="chk"><input type="checkbox" id="snap"> Snap drags to grid</label>
+  <span id="status" class="muted right"></span>
+</footer>
+
+<dialog id="helpDlg">
+  <h3>Shortcuts</h3>
+  <table>
+    <tr><td>Space</td><td>Play / pause from playhead</td></tr>
+    <tr><td>B</td><td>Toggle Cleaned / Original playback (A/B)</td></tr>
+    <tr><td>M</td><td>Metronome click on tempo map</td></tr>
+    <tr><td>Home / End</td><td>Go to start / end</td></tr>
+    <tr><td>[ / ] (Page Up / Down)</td><td>Previous / next section (fits it on screen)</td></tr>
+    <tr><td>+ / − / 0</td><td>Zoom in / out / fit whole piece</td></tr>
+    <tr><td>Click ruler</td><td>Move playhead</td></tr>
+    <tr><td>Wheel / Shift+Wheel</td><td>Scroll time / pitch</td></tr>
+    <tr><td>Ctrl+Wheel, + / −</td><td>Zoom time</td></tr>
+    <tr><td>Click note, Shift+click</td><td>Select / add to selection</td></tr>
+    <tr><td>Drag empty area</td><td>Box select</td></tr>
+    <tr><td>Drag note / right edge</td><td>Move / resize (Alt = no snap)</td></tr>
+    <tr><td>← / →</td><td>Nudge selection 10 ms (Shift: 1 ms)</td></tr>
+    <tr><td>↑ / ↓</td><td>Transpose selection a semitone</td></tr>
+    <tr><td>Delete / Backspace</td><td>Remove selected notes</td></tr>
+    <tr><td>R</td><td>Restore selected (undo removals and your edits on them)</td></tr>
+    <tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Undo / redo</td></tr>
+    <tr><td>Ctrl+S</td><td>Save review</td></tr>
+    <tr><td>N</td><td>Leave Claude a note about the selected notes / box region</td></tr>
+    <tr><td>Esc</td><td>Clear selection</td></tr>
+  </table>
+  <p class="muted">The editor never moves section boundaries. Timing edits only happen inside sections, so the video sync holds.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<script src="audio.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

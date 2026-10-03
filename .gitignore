@@ -1,0 +1,7 @@
+# Your takes and everything derived from them stay local
+raw_midi/
+work/*
+!work/.gitkeep
+
+__pycache__/
+*.pyc
