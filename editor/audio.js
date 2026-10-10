@@ -82,15 +82,21 @@ class SampleBank {
   }
 }
 
+function seededRandom(seed) { // mulberry32: deterministic, so separately rendered pieces match
+  return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
 function makeImpulse(ctx, seconds) {
   const len = Math.floor(ctx.sampleRate * seconds);
   const buf = ctx.createBuffer(2, len, ctx.sampleRate);
   for (let c = 0; c < 2; c++) {
     const d = buf.getChannelData(c);
+    const rnd = seededRandom(1234 + c);
     let lp = 0;
     for (let i = 0; i < len; i++) {
       const t = i / len;
-      lp = lp * 0.6 + (Math.random() * 2 - 1) * 0.4; // slightly darkened noise
+      lp = lp * 0.6 + (rnd() * 2 - 1) * 0.4; // slightly darkened noise
       d[i] = lp * Math.pow(1 - t, 3.2) * (i < 64 ? i / 64 : 1);
     }
   }
@@ -106,8 +112,9 @@ function driveCurve(amount) {
   return curve;
 }
 
-// Build the effects rack on any (real or offline) context. Returns {input, apply(fx)}.
-function buildFx(ctx, fx) {
+// Build the effects rack on any (real or offline) context. Returns {input, apply(fx), band(vel)}.
+// t0 = song time at context time 0, so a piece rendered separately has its chorus LFO in phase.
+function buildFx(ctx, fx, t0 = 0) {
   const input = ctx.createGain();
   const shaper = ctx.createWaveShaper();
   shaper.oversample = '2x';
@@ -126,9 +133,12 @@ function buildFx(ctx, fx) {
   const chorusParts = [];
   for (const [rate, pan] of [[0.7, -0.6], [0.93, 0.6]]) {
     const d = ctx.createDelay(0.1); d.delayTime.value = 0.018;
-    const lfo = ctx.createOscillator(); lfo.frequency.value = rate;
+    const plen = Math.round(ctx.sampleRate / rate), period = plen / ctx.sampleRate;
+    const sine = ctx.createBuffer(1, plen, ctx.sampleRate), sd = sine.getChannelData(0);
+    for (let i = 0; i < plen; i++) sd[i] = Math.sin(2 * Math.PI * i / plen);
+    const lfo = ctx.createBufferSource(); lfo.buffer = sine; lfo.loop = true;
     const depth = ctx.createGain(); depth.gain.value = 0.004;
-    lfo.connect(depth); depth.connect(d.delayTime); lfo.start();
+    lfo.connect(depth); depth.connect(d.delayTime); lfo.start(0, t0 % period);
     const p = ctx.createStereoPanner(); p.pan.value = pan;
     pre.connect(d); d.connect(p); p.connect(chWet);
     chorusParts.push(depth);
@@ -161,36 +171,50 @@ function buildFx(ctx, fx) {
     master.gain.value = f.volume;
   }
   apply(fx);
-  return { input, apply };
+  // Shared velocity-band lowpass filters (the Salamander set has one velocity layer, so quiet notes
+  // are darkened). Six shared filters instead of one per voice keeps long renders fast.
+  const bands = [];
+  function band(vel) {
+    const k = Math.min(5, Math.floor(vel / 22));
+    if (!bands[k]) {
+      const f = ctx.createBiquadFilter();
+      f.type = 'lowpass'; f.Q.value = 0.3;
+      f.frequency.value = 900 + 17000 * Math.pow((k * 22 + 11) / 127, 2.2);
+      f.connect(input);
+      bands[k] = f;
+    }
+    return bands[k];
+  }
+  return { input, apply, band };
 }
 
 // Schedule one note on a context. Returns the source node (so it can be stopped).
-function playNote(ctx, dest, lookup, inst, n, when, offWhen) {
+function playNote(ctx, rack, lookup, inst, n, when, offWhen) {
   const s = lookup[n.pitch];
   if (!s || !s.buffer) return null;
   const src = ctx.createBufferSource();
   src.buffer = s.buffer;
-  src.playbackRate.value = Math.pow(2, (n.pitch - s.root) / 12);
+  const rate = Math.pow(2, (n.pitch - s.root) / 12);
+  src.playbackRate.value = rate;
   const g = ctx.createGain();
   const v = n.vel / 127;
   const peak = 0.06 + 0.9 * Math.pow(v, 1.7);
-  let node = src;
-  if (inst.kind === 'salamander') {
-    // single velocity layer: soften quiet notes with a velocity-tracking lowpass
-    const f = ctx.createBiquadFilter();
-    f.type = 'lowpass';
-    f.frequency.value = 900 + 17000 * Math.pow(v, 2.2);
-    f.Q.value = 0.3;
-    src.connect(f); node = f;
-  }
-  node.connect(g); g.connect(dest);
-  g.gain.setValueAtTime(0, when);
-  g.gain.linearRampToValueAtTime(peak, when + 0.004);
+  src.connect(g);
+  g.connect(inst.kind === 'salamander' ? rack.band(n.vel) : rack.input);
   const rel = inst.release || 0.3;
   const stopAt = Math.max(offWhen, when + 0.02);
+  const late = Math.max(0, -when); // started before this (offline) context began
+  if (late > 0) {
+    if (stopAt <= 0) return null;
+    g.gain.setValueAtTime(peak, 0);
+  } else {
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(peak, when + 0.004);
+  }
   g.gain.setValueAtTime(peak, stopAt);
   g.gain.setTargetAtTime(0, stopAt, rel / 4);
-  src.start(when);
+  if (late * rate >= s.buffer.duration) return null;
+  src.start(Math.max(0, when), late * rate);
   src.stop(stopAt + rel * 2 + 0.05);
   return { src, g, pitch: n.pitch, end: stopAt + rel * 2 };
 }
@@ -262,7 +286,7 @@ class Player {
         for (const v of this.voices) if (v.pitch === n.pitch && v.end > when) {
           v.g.gain.cancelScheduledValues(when); v.g.gain.setTargetAtTime(0, when, 0.015); v.end = when;
         }
-        const v = playNote(ctx, this.rack.input, this.lookup, this.inst, n, Math.max(when, now), off);
+        const v = playNote(ctx, this.rack, this.lookup, this.inst, n, Math.max(when, now), off);
         if (v) this.voices.push(v);
       }
       if (this.metronome) {
@@ -304,44 +328,101 @@ class Player {
     this.voices = [];
   }
   // Render the whole performance (with effects) to a WAV Blob.
-  async renderWav(notes, ccs, end, onProgress) {
-    const sr = 44100;
+  // Long takes are split into pieces rendered in parallel (one offline context per CPU core). Each
+  // piece starts PRE seconds early so held notes, reverb and compressor are already in the right state
+  // at the join, effects are deterministic, and joins get a short crossfade. Within a piece, notes are
+  // scheduled block by block during the render (suspend/resume) so the audio graph stays small.
+  async renderWav(notes, ccs, end, onProgress, signal) {
+    const sr = 44100, PRE = 8, XF = 0.02;
     const dur = end + 3;
-    const off = new OfflineAudioContext(2, Math.ceil(sr * dur), sr);
-    const rack = buildFx(off, this.fx);
     const ns = notes.slice().sort((a, b) => a.on - b.on);
     pedalReleaseTimes(ns, ccs);
+    const K = dur > 90 ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 2)) : 1;
+    const cuts = Array.from({ length: K + 1 }, (_, k) => Math.round(dur * k / K * sr) / sr);
+    const prog = new Array(K).fill(0);
+    const report = () => onProgress && onProgress(prog.reduce((a, b) => a + b, 0) / K, 'rendering');
+    const pieces = await Promise.all(cuts.slice(0, K).map((t0, k) => {
+      const s0 = Math.max(0, t0 - PRE), s1 = Math.min(dur, cuts[k + 1] + (k < K - 1 ? XF : 0));
+      return this._renderPiece(ns, s0, s1, sr, signal, f => { prog[k] = f; report(); });
+    }));
+    if (signal && signal.aborted) throw new DOMException('Export cancelled', 'AbortError');
+    onProgress && onProgress(1, 'encoding');
+    await new Promise(r => setTimeout(r, 0));
+    return encodePieces(pieces, cuts, sr, XF);
+  }
+
+  async _renderPiece(ns, s0, s1, sr, signal, onFrac) {
+    const STEP = 4.0;
+    const off = new OfflineAudioContext(2, Math.ceil((s1 - s0) * sr), sr);
+    const rack = buildFx(off, this.fx, s0);
+    const len = s1 - s0;
     const last = {};
-    for (const n of ns) {
-      const prev = last[n.pitch];
-      if (prev && prev.end > n.on) { prev.g.gain.cancelScheduledValues(n.on); prev.g.gain.setTargetAtTime(0, n.on, 0.015); }
-      const v = playNote(off, rack.input, this.lookup, this.inst, n, n.on + 0.05, n.release + 0.05);
-      if (v) last[n.pitch] = v;
+    // notes still sounding at s0 (incl. pedal + release tail) or starting inside the piece
+    let i = 0;
+    const live = ns.filter(n => n.on < s1 && n.release + 2 > s0);
+    const schedule = upto => {
+      while (i < live.length && live[i].on - s0 < upto) {
+        const n = live[i++];
+        const when = n.on - s0;
+        const prev = last[n.pitch];
+        if (prev && prev.end > when && when > 0) { prev.g.gain.cancelScheduledValues(when); prev.g.gain.setTargetAtTime(0, when, 0.015); }
+        const v = playNote(off, rack, this.lookup, this.inst, n, when, n.release - s0);
+        if (v) last[n.pitch] = v;
+      }
+    };
+    let aborted = false;
+    schedule(STEP + 0.5);
+    for (let t = STEP; t < len; t += STEP) {
+      off.suspend(t).then(() => {
+        if (signal && signal.aborted) aborted = true;
+        if (!aborted) schedule(t + STEP + 0.5);
+        onFrac(t / len);
+        off.resume();
+      });
     }
-    onProgress && onProgress('rendering…');
     const buf = await off.startRendering();
-    return encodeWav(buf);
+    onFrac(1);
+    return { buf, s0 };
   }
 }
 
-function encodeWav(buf) {
-  const nch = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
-  const out = new DataView(new ArrayBuffer(44 + len * nch * 2));
-  const w = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
-  w(0, 'RIFF'); out.setUint32(4, 36 + len * nch * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
-  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, nch, true);
-  out.setUint32(24, sr, true); out.setUint32(28, sr * nch * 2, true); out.setUint16(32, nch * 2, true);
-  out.setUint16(34, 16, true); w(36, 'data'); out.setUint32(40, len * nch * 2, true);
-  const chans = []; for (let c = 0; c < nch; c++) chans.push(buf.getChannelData(c));
+// Join rendered pieces into one 16-bit WAV, crossfading XF seconds at each join and normalizing only
+// if it would clip. Piece k covers global frames [starts[k], starts[k+1]); the first xf frames after a
+// join blend in the previous piece's overlap.
+function encodePieces(pieces, cuts, sr, XF) {
+  const total = Math.round(cuts[cuts.length - 1] * sr);
+  const xf = Math.round(XF * sr);
+  const starts = cuts.map(t => Math.round(t * sr));
+  starts[starts.length - 1] = total;
+  const offs = pieces.map(p => Math.round(p.s0 * sr));
+  const L = pieces.map(p => p.buf.getChannelData(0)), R = pieces.map(p => p.buf.getChannelData(1));
+  const span = k => [starts[k], starts[k + 1]];
+  // pass 1: peak
   let peak = 0;
-  for (const d of chans) for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(d[i]));
-  const norm = peak > 0.98 ? 0.98 / peak : 1;
-  let o = 44;
-  for (let i = 0; i < len; i++) for (let c = 0; c < nch; c++) {
-    const s = Math.max(-1, Math.min(1, chans[c][i] * norm));
-    out.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2;
+  for (let k = 0; k < pieces.length; k++) {
+    const [a, b] = span(k), o = offs[k];
+    for (const d of [L[k], R[k]]) for (let f = a; f < b; f++) { const v = Math.abs(d[f - o] || 0); if (v > peak) peak = v; }
   }
-  return new Blob([out.buffer], { type: 'audio/wav' });
+  const norm = peak > 0.98 ? 0.98 / peak : 1;
+  const bytes = new ArrayBuffer(44 + total * 4);
+  const hdr = new DataView(bytes, 0, 44);
+  const w = (o, str) => { for (let i = 0; i < str.length; i++) hdr.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, 'RIFF'); hdr.setUint32(4, 36 + total * 4, true); w(8, 'WAVE'); w(12, 'fmt ');
+  hdr.setUint32(16, 16, true); hdr.setUint16(20, 1, true); hdr.setUint16(22, 2, true);
+  hdr.setUint32(24, sr, true); hdr.setUint32(28, sr * 4, true); hdr.setUint16(32, 4, true);
+  hdr.setUint16(34, 16, true); w(36, 'data'); hdr.setUint32(40, total * 4, true);
+  const pcm = new Int16Array(bytes, 44, total * 2); // WAV is little-endian, as are x86/ARM
+  const q = v => { v *= norm; v = v > 1 ? 1 : v < -1 ? -1 : v; return v < 0 ? v * 0x8000 : v * 0x7fff; };
+  for (let k = 0; k < pieces.length; k++) {
+    const [a, b] = span(k), o = offs[k], l = L[k], r = R[k];
+    const po = k ? offs[k - 1] : 0, pl = k ? L[k - 1] : null, pr = k ? R[k - 1] : null;
+    for (let f = a; f < b; f++) {
+      let x = l[f - o] || 0, y = r[f - o] || 0;
+      if (k && f < a + xf) { const wt = (f - a) / xf; x = x * wt + (pl[f - po] || 0) * (1 - wt); y = y * wt + (pr[f - po] || 0) * (1 - wt); }
+      pcm[2 * f] = q(x); pcm[2 * f + 1] = q(y);
+    }
+  }
+  return new Blob([bytes], { type: 'audio/wav' });
 }
 
 window.Audio2 = { INSTRUMENTS, FX_DEFAULTS, Player };

@@ -833,14 +833,7 @@ async function boot() {
     S.dirty = false; $('saveState').textContent = 'saved + exported';
     $('status').textContent = `wrote work/${S.name}/${S.name}.clean.mid · ` + (r.headers.get('X-Render-Log') || '').split(' | ')[1];
   };
-  $('exportWav').onclick = async () => {
-    if (!player.lookup) return;
-    $('status').textContent = 'rendering WAV (this takes a few seconds)…';
-    const { notes, ccs } = playbackNotes(S.source);
-    const blob = await player.renderWav(notes, ccs, S.P.end, m => $('status').textContent = m);
-    download(blob, `${S.name}.${S.source === 'orig' ? 'original' : 'clean'}.${player.inst.id}.wav`);
-    $('status').textContent = 'WAV exported (' + (S.source === 'orig' ? 'original' : 'cleaned') + ', ' + player.inst.name + ')';
-  };
+  $('exportWav').onclick = exportWav;
   window.addEventListener('beforeunload', ev => { if (S.dirty) { ev.preventDefault(); ev.returnValue = ''; } });
   new ResizeObserver(resize).observe($('rollWrap'));
   renderFx();
@@ -856,6 +849,44 @@ async function boot() {
   sel.value = inst;
   setInstrument(inst);
 }
+async function exportWav() {
+  if (S.wavJob) return;
+  const box = $('wavProgress');
+  const show = (html, cls = '') => { box.className = 'wavprog ' + cls; box.innerHTML = html; };
+  if (!player.lookup) {
+    show(`Samples for ${player.inst.name} are still loading. Try again in a moment. <button id="wavX">OK</button>`, 'err');
+    $('wavX').onclick = () => box.classList.add('hidden');
+    return;
+  }
+  const which = S.source === 'orig' ? 'original' : 'cleaned';
+  const ac = new AbortController();
+  S.wavJob = ac;
+  $('exportWav').disabled = true;
+  const t0 = performance.now();
+  show(`<b>Exporting WAV</b> (${which}, ${player.inst.name})<div class="bar"><i style="width:0%"></i></div><span id="wavTxt">starting…</span> <button id="wavCancel">Cancel</button>`);
+  $('wavCancel').onclick = () => { ac.abort(); $('wavTxt').textContent = 'cancelling…'; };
+  const prog = (f, stage) => {
+    const bar = box.querySelector('.bar i'); if (bar) bar.style.width = (f * 100).toFixed(1) + '%';
+    const el = $('wavTxt'); if (!el) return;
+    if (stage === 'encoding') { el.textContent = 'encoding file…'; return; }
+    const spent = (performance.now() - t0) / 1000, left = f > 0.02 ? spent * (1 - f) / f : null;
+    el.textContent = `${Math.round(f * 100)}% · ${fmt(f * S.P.end).replace(/\.\d+$/, '')} of ${fmt(S.P.end).replace(/\.\d+$/, '')}` + (left != null ? ` · ~${Math.ceil(left)} s left` : '');
+  };
+  try {
+    const { notes, ccs } = playbackNotes(S.source);
+    const blob = await player.renderWav(notes, ccs, S.P.end, prog, ac.signal);
+    const name = `${S.name}.${which === 'original' ? 'original' : 'clean'}.${player.inst.id}.wav`;
+    download(blob, name);
+    show(`WAV exported: <b>${name}</b> (${(blob.size / 1e6).toFixed(0)} MB, ${((performance.now() - t0) / 1000).toFixed(0)} s) <button id="wavX">OK</button>`, 'ok');
+  } catch (err) {
+    show(err.name === 'AbortError' ? 'WAV export cancelled. <button id="wavX">OK</button>'
+      : `WAV export failed: ${esc(err.message || err)} <button id="wavX">OK</button>`, err.name === 'AbortError' ? '' : 'err');
+  } finally {
+    S.wavJob = null; $('exportWav').disabled = false;
+    const x = $('wavX'); if (x) x.onclick = () => box.classList.add('hidden');
+  }
+}
+
 function download(blob, name) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); }
 
 boot();
