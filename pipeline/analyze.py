@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Stage 1: analyze a raw performance MIDI.
 
-    python3 pipeline/analyze.py path/to/take.mid [--work work/]
+    python3 pipeline/analyze.py path/to/take.mid [--work work/] [--trim auto|yes|no]
+
+Lead-in silence: --trim yes moves the first note to 0:00. --trim no keeps the file's own clock
+(use it when MIDI 0:00 is already video 0:00). auto (default) keeps the clock if a sidecar
+<take>.json next to the MIDI declares "time_zero" (the recorder's video-aligned takes), else trims.
 
 Writes work/<name>/:
   analysis.json  - trimmed notes/pedal, detections (trills, rolls, slip candidates),
@@ -9,7 +13,8 @@ Writes work/<name>/:
   plan.auto.json - machine-suggested section plan (the AI reviews and copies it to plan.json)
   report.md      - readable summary for the AI reviewer
 
-Nothing here changes notes. All times are on the *trimmed* timeline (first note = 0).
+Nothing here changes notes. All times are on the pipeline timeline: file time minus `trim`
+(trim = 0 when the lead-in is kept, so pipeline time == video time).
 """
 import argparse
 import json
@@ -34,11 +39,20 @@ def pname(p):
 # --------------------------------------------------------------------------- load
 
 
-def load_trimmed(path):
+def sidecar_says_aligned(path):
+    """The recorder writes <take>.json; "time_zero" means the MIDI clock already is the video clock."""
+    try:
+        with open(os.path.splitext(path)[0] + ".json") as f:
+            return bool(json.load(f).get("time_zero"))
+    except (OSError, ValueError):
+        return False
+
+
+def load_trimmed(path, do_trim=True):
     song = midiio.read(path)
     if not song.notes:
         raise SystemExit("no notes in file")
-    trim = min(n.on for n in song.notes)
+    trim = min(n.on for n in song.notes) if do_trim else 0.0
     notes = [
         dict(id=n.id, pitch=n.pitch, vel=n.vel, on=round(n.on - trim, 6),
              off=round(n.off - trim, 6), ch=n.ch)
@@ -346,13 +360,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("midi")
     ap.add_argument("--work", default=os.path.join(os.path.dirname(__file__), "..", "work"))
+    ap.add_argument("--trim", choices=["auto", "yes", "no"], default="auto")
     args = ap.parse_args()
+    aligned = sidecar_says_aligned(args.midi)
+    do_trim = args.trim == "yes" or (args.trim == "auto" and not aligned)
 
     name = os.path.splitext(os.path.basename(args.midi))[0]
     wd = os.path.abspath(os.path.join(args.work, name))
     os.makedirs(wd, exist_ok=True)
 
-    song, trim, notes, ccs = load_trimmed(args.midi)
+    song, trim, notes, ccs = load_trimmed(args.midi, do_trim)
     end = round(song.end - trim, 6)
     last_off = max(n["off"] for n in notes)
     clusters = onset_clusters(notes)
@@ -367,6 +384,7 @@ def main():
 
     analysis = dict(
         source=os.path.abspath(args.midi), name=name, trim=round(trim, 6), end=end,
+        lead_in_kept=not do_trim, first_note=round(min(n["on"] for n in notes), 6),
         last_note_off=round(last_off, 6), tpq=song.tpq,
         original_tempos=song.tempos, original_timesigs=song.timesigs,
         notes=notes, ccs=ccs, clusters=clusters, tempo_curve=curve,
@@ -391,8 +409,13 @@ def main():
     # ------------------------------------------------------------- report
     L = []
     L.append(f"# Analysis: {name}\n")
-    L.append(f"- trimmed leading silence: **{trim:.3f}s** (first note now at 0.000)")
-    L.append(f"- duration after trim: {end:.3f}s (end-of-track), last note-off {last_off:.3f}s")
+    if do_trim:
+        L.append(f"- trimmed leading silence: **{trim:.3f}s** (first note now at 0.000)")
+    else:
+        first = min(n["on"] for n in notes)
+        L.append(f"- lead-in **kept**: pipeline time == file time{' == video time (sidecar)' if aligned else ''}; "
+                 f"first note at {first:.3f}s. The first section must start at 0.000 (make 0 -> first downbeat its own rubato section).")
+    L.append(f"- duration: {end:.3f}s (end-of-track), last note-off {last_off:.3f}s")
     L.append(f"- notes: {len(notes)}, onset clusters: {len(clusters)}, CC events: {len(ccs)}\n")
     L.append("## Local tempo (10 s windows, top autocorrelation peaks, bpm:score)\n")
     L.append("Peaks related by 2x/3x indicate the metric hierarchy (e.g. 177 and 59 => 3 beats per bar).\n")
@@ -421,7 +444,7 @@ def main():
     with open(os.path.join(wd, "report.md"), "w") as f:
         f.write("\n".join(L) + "\n")
     print(f"wrote {wd}/analysis.json, plan.auto.json, report.md")
-    print(f"trim {trim:.3f}s | {len(orn)} ornaments | {len(rolls)} rolls | {len(slips)} slip candidates")
+    print(f"{'trim %.3fs' % trim if do_trim else 'lead-in kept (no trim)'} | {len(orn)} ornaments | {len(rolls)} rolls | {len(slips)} slip candidates")
 
 
 if __name__ == "__main__":

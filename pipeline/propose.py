@@ -157,13 +157,38 @@ def steady_grid(beats, num, anchor_bars, anchor_times, max_shift_beats, template
         return anchored_grid(beats, idx, template), idx
 
     if anchor_bars == "auto":
-        for K in (None, 16, 8, 4, 2, 1):
-            g, idx = build(K)
-            if max(abs(a - b) for a, b in zip(g, beats)) / P <= max_shift_beats:
-                return g, idx, K
-        return g, idx, 1
+        g, idx = build(None)
+        if max(abs(a - b) for a, b in zip(g, beats)) / P <= max_shift_beats:
+            return g, idx, None
+        # Adaptive phrases: from each anchor, extend to the farthest bar line (<= 16 bars, never past a
+        # pinned beat) whose evenly spaced grid stays within the limit. Long phrases where the playing is
+        # steady, short ones only around the spots that need them.
+        def ok(a, b):
+            seg = anchored_grid(beats[a:b + 1], [0, b - a], template)
+            return max(abs(x - y) for x, y in zip(seg, beats[a:b + 1])) / P <= max_shift_beats
+        idx, a = [0], 0
+        pins = sorted(pinned)
+        while a < N:
+            limit = min(next(q for q in pins if q > a), a + 16 * num)
+            cands = sorted({c for c in range(a + num, limit + 1, num)} | {limit}, reverse=True)
+            b = next((c for c in cands if ok(a, c)), min(a + num, limit))
+            idx.append(b)
+            a = b
+        lens = np.diff(idx) / num
+        return anchored_grid(beats, idx, template), idx, f"{lens.mean():.1f} (adaptive, {lens.min():.0f}-{lens.max():.0f})"
     g, idx = build(anchor_bars or None)
     return g, idx, anchor_bars
+
+
+def max_shift_limit(s, plan, beats):
+    """Largest allowed beat shift for phrase anchoring, in beats. `max_shift_ms` (section or plan level)
+    caps it in absolute time, which matters for picture sync at slow tempos."""
+    lim = s.get("max_shift_beats", 0.5)
+    ms = s.get("max_shift_ms", plan.get("max_shift_ms"))
+    if ms:
+        P = (beats[-1] - beats[0]) / max(1, len(beats) - 1)
+        lim = min(lim, ms / 1000.0 / P)
+    return lim
 
 
 def ideal_grid(beats, mode):
@@ -299,7 +324,7 @@ def main():
         hint = s["bpm_hint"]
         P = 60.0 / hint
         if s.get("beats"):
-            beats = [start] + [b for b in s["beats"] if start < b < end] + [end]
+            beats = [start] + [b for b in s["beats"] if start + 0.05 < b < end - 0.05] + [end]  # ignore beats that duplicate the edges
             src = "plan"
         else:
             beats = track_beats(x, start, end, hint, s.get("tightness", 120.0))
@@ -330,7 +355,7 @@ def main():
             use_tpl = feel["template"] if feel and (keep_feel is True or (keep_feel == "auto" and feel["significant"])) else None
             grid, anchors_used, anchor_bars = steady_grid(
                 beats, s.get("num", 4), s.get("anchor_every_bars", "auto"), s.get("anchors", []),
-                s.get("max_shift_beats", 0.5), use_tpl)
+                max_shift_limit(s, plan, beats), use_tpl)
             diag["feel_kept"] = bool(use_tpl)
         elif mode == "ramp":
             grid = ideal_grid(beats, mode)

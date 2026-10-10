@@ -97,7 +97,7 @@ function validate() {
     ok(true, `Length ${fmt(P.end)} fixed · ${P.sections.length} section boundaries pinned`),
     ok(crossed === 0, `${crossed} notes crossed a section boundary`),
     ok(merges === 0 && swaps === 0, `${merges} onset merges · ${swaps} order swaps`),
-    `<span class="muted">${removed} removed · ${moved.length} moved (max ${(maxMove * 1000).toFixed(0)} ms) · trimmed ${P.trim.toFixed(3)}s lead-in</span>`,
+    `<span class="muted">${removed} removed · ${moved.length} moved (max ${(maxMove * 1000).toFixed(0)} ms) · ${P.trim > 0 ? `trimmed ${P.trim.toFixed(3)}s lead-in` : 'lead-in kept (file time = video time)'}</span>`,
   ].join('<br>');
 }
 

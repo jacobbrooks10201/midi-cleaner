@@ -3,7 +3,8 @@
 An AI-reviewed cleanup pipeline and browser editor for piano improvisations recorded to picture.
 
 **Golden rule:** total length and each section's length never change, so the MIDI stays locked
-to the video. The only global change is trimming the lead-in silence: the first note lands at 0:00.
+to the video. Video-aligned takes (recorder sidecar `<take>.json` saying MIDI 0:00 = video 0:00) keep their lead-in;
+other takes have the lead-in trimmed so the first note lands at 0:00 (`analyze.py --trim auto|yes|no`).
 
 ## Use
 
@@ -29,7 +30,7 @@ Needs only Python 3 with numpy + scipy and a modern browser. Samples are bundled
 
 | | |
 |---|---|
-| Lead-in silence | always trimmed; pedal state before the first note is kept at 0:00 |
+| Lead-in silence | kept for video-aligned takes, else trimmed (pedal state before the first note is kept at 0:00) |
 | Sections | by tempo and meter, each **steady**, **ramp** (accel/rit), or **rubato** (untouched) |
 | Tempo regularization | beat-warp onto an even grid between pinned boundaries, not quantization. Intra-beat timing stretches proportionally. Long sections are re-pinned every N bars so nothing drifts off picture |
 | Feel | a consistent in-bar lilt (e.g. beat 4 always long) is detected and kept |
@@ -37,6 +38,7 @@ Needs only Python 3 with numpy + scipy and a modern browser. Samples are bundled
 | Trills / tremolos | detected and protected: they move rigidly and are never edited |
 | Rolled chords | same total span, strikes evenly spaced |
 | Fat-fingers / missed notes | proposed removals with evidence and an AI verdict. Notes are never added |
+| Picture sync | `max_shift_ms` caps how far any note can drift from where it was played; phrase anchors are adaptive; specific notes can be pinned with `anchors` |
 | Guards | merges, order swaps, boundary crossings, shift size: shown in review.md and live in the editor |
 
 ## Editor
@@ -55,7 +57,7 @@ Needs only Python 3 with numpy + scipy and a modern browser. Samples are bundled
 
 ```
 pipeline/midiio.py   dependency-free MIDI read/write (tempo map from beat grid)
-pipeline/analyze.py  trim, onset clusters, local tempo, ornaments, rolls, slip candidates
+pipeline/analyze.py  lead-in (keep/trim), onset clusters, local tempo, ornaments, rolls, slip candidates
 pipeline/propose.py  beat tracking, warps, feel, anchors, rolls, removals, guards -> proposals.json
 pipeline/render.py   apply decisions -> cleaned MIDI (+ timing verification)
 pipeline/look.py     look at notes/beats/slips/rolls (for the AI reviewer)

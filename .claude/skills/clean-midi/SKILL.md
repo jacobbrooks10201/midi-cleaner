@@ -1,6 +1,6 @@
 ---
 name: clean-midi
-description: Clean a recorded piano-improvisation MIDI for a soundtrack, keeping it locked to the video. Trims lead-in silence, splits the take into tempo/meter sections, regularizes tempo by beat-warping (never naive quantization), removes stutters, evens rolled chords, protects trills, and proposes fat-finger removals. Everything ends up as reviewable proposals in the browser editor. Use when the user gives a .mid take to clean, asks to re-review one, or says "reassess" (handle the notes they left in the editor).
+description: Clean a recorded piano-improvisation MIDI for a soundtrack, keeping it locked to the video. Keeps or trims the lead-in (video-aligned takes keep it), splits the take into tempo/meter sections, regularizes tempo by beat-warping (never naive quantization), removes stutters, evens rolled chords, protects trills, and proposes fat-finger removals. Everything ends up as reviewable proposals in the browser editor. Use when the user gives a .mid take to clean, asks to re-review one, or says "reassess" (handle the notes they left in the editor).
 ---
 
 # Clean a performance MIDI (AI-reviewed pipeline)
@@ -13,8 +13,12 @@ handing it to the user, who validates everything in the editor.
 
 The take was played to picture. **Total length and every section's length are fixed.**
 - Section boundaries are pinned in time. Timing edits happen *inside* sections only.
-- The only global time change is trimming lead-in silence: the first note goes to 0:00. This
-  is always done, and the user aligns the video to that first note.
+- Lead-in silence: if the take is already aligned to the video (the recorder writes a sidecar
+  `<take>.json` with `"time_zero": "MIDI 0:00 is video 0:00"`), **keep it**. Nothing moves and pipeline
+  time equals video time. `analyze.py --trim auto` (the default) detects this. Takes without a sidecar
+  are trimmed so the first note lands at 0:00, and the user aligns the video to it. If the user says how
+  they want it, use `--trim yes|no`. With a kept lead-in, section 0 must start at 0.000, so make
+  0 → first downbeat its own rubato section.
 - Never add notes. You may only propose removals, timing moves, and nothing else.
 - `render.py` and the editor both check this (length unchanged, boundaries pinned, nothing crossing
   a boundary). If anything you do breaks it, it's a bug: stop and fix it.
@@ -32,8 +36,8 @@ python3 serve.py                                  # editor at http://localhost:8
 
 Your eyes on the music: `python3 pipeline/look.py work/<name> notes|beats|slips|rolls ...`.
 **Look at notes before deciding anything.** Every number in the report is a hint, not a verdict.
-All times are on the trimmed timeline. Don't subtract the trim again (it's an easy mistake: the
-report and look output are already trimmed).
+All times are on the pipeline timeline (file time minus `trim`, which is 0 for kept lead-ins).
+Report and look output are already on it, so don't subtract the trim again.
 
 ## 1. Sections (tempo / meter / mode)
 
@@ -81,6 +85,35 @@ stutters, and downbeat evidence. Use `look beats` to see what actually lands on 
   (times within 40 ms of the tracked beat) or give the section an explicit `beats` list.
 - If `bars` isn't an integer in a steady section, the start isn't on a downbeat, the meter is
   wrong, or a beat was inserted or dropped. Check downbeat evidence (position 0 should be strongest).
+
+### Long takes and picture (lessons from a 20-minute score)
+- **Don't assume the music follows the video's cuts.** Segment from the music itself. A shot list is
+  at most weak, secondary evidence. On the perfect-game take, onsets near cuts were exactly at chance
+  (12/43 within 50 ms vs 10 ± 3 for random times), and only 3 of 22 long silences sat near a cut.
+- **Before calling anything a "sync hit", test it against chance:** with ~2.5 onsets/s, a random moment
+  has a ~20% chance of an onset within ±50 ms. Only pin cut-aligned notes (as `anchors`) if hits clearly
+  beat randomly shifted cut times, or if the user says they played to the cuts.
+- **More, smaller sections beat long ones:** split steady cues where the tempo truly changes (an
+  optimal-segmentation pass over per-bar tempos, min ~3 bars, ≥ ~4% change), and promote steady
+  runs of ≥ 3 bars inside rubato passages to their own steady sections.
+- **When supplying explicit `beats`, never round section starts** past the beat they sit on. (propose.py
+  now ignores supplied beats within 50 ms of a section edge, but keep the starts exact anyway.)
+- **Cap the drift in milliseconds:** set plan-level `"max_shift_ms": 180` (or per section). At slow
+  tempos half a beat is 400 ms, which is visibly off picture. Phrase anchors are adaptive: long phrases
+  where the playing is steady, short ones only around problem spots.
+- **Steady body + rubato tails:** cues usually settle in for a bar, run steady, then broaden into a
+  pause. Regularize only the body (start and end on downbeats). The slow-in, rit tail and silence
+  belong to the neighbouring rubato section.
+- **Track at the felt beat** (usually the quarter), not the fastest notes. Warping at the eighth or
+  sixteenth level drifts toward quantization.
+- **Uniform ostinatos are a trap:** with an onset on every sixteenth, the tracker can't tell where the
+  beat is and snaps to syncopated bass anticipations (pairs of short/long beats like 558/1040 ms). If a
+  direct fit doesn't give a stable beat, leave it rubato and say so.
+- **Repeated-note figures fool the slip detector** (fast re-strikes look like pre-strikes). If the same
+  figure recurs, it's intentional.
+- A scratch evaluator that runs `propose.track_beats` on candidate spans and prints per-bar tempo,
+  rubato score, stutters and downbeat phase for 3 vs 4 is worth writing on long takes, so you can
+  test boundaries quickly.
 
 ## 2. Doubt the regularization (most important)
 
